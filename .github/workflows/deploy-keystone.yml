@@ -16,7 +16,7 @@ concurrency:
 env:
   DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
   DEPLOY_PORT: ${{ vars.DEPLOY_SSH_PORT || '22' }}
-  DEPLOY_TARGET_DIR: ${{ vars.DEPLOY_TARGET_DIR || '/opt/keystone' }}
+  DEPLOY_TARGET_DIR: ${{ vars.DEPLOY_TARGET_DIR || '/opt/yunion/keystone' }}
   DEPLOY_IMAGE_NAME: ${{ vars.DEPLOY_IMAGE_NAME || 'cloudpods/keystone' }}
   DEPLOY_CONTAINER_NAME: ${{ vars.DEPLOY_CONTAINER_NAME || 'keystone' }}
   DEPLOY_CONFIG_FILE: ${{ vars.DEPLOY_CONFIG_FILE || '/etc/yunion/keystone.conf' }}
@@ -101,9 +101,7 @@ jobs:
 
       - name: Configure SSH
         env:
-          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
 
@@ -112,13 +110,6 @@ jobs:
           chmod 700 "${ssh_dir}"
           printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "${ssh_dir}/id_ed25519"
           chmod 600 "${ssh_dir}/id_ed25519"
-
-          if [ -n "${DEPLOY_SSH_KNOWN_HOSTS:-}" ]; then
-            printf '%s\n' "${DEPLOY_SSH_KNOWN_HOSTS}" > "${ssh_dir}/known_hosts"
-          else
-            ssh-keyscan -p "${DEPLOY_PORT}" -H "${DEPLOY_HOST}" > "${ssh_dir}/known_hosts"
-          fi
-          chmod 644 "${ssh_dir}/known_hosts"
 
           echo "SSH_DIR=${ssh_dir}" >> "${GITHUB_ENV}"
 
@@ -133,8 +124,8 @@ jobs:
             -p "${DEPLOY_PORT}"
             -o BatchMode=yes
             -o IdentitiesOnly=yes
-            -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="${SSH_DIR}/known_hosts"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
           )
 
           ssh "${ssh_opts[@]}" "${DEPLOY_SSH_USER}@${DEPLOY_HOST}" \
@@ -152,8 +143,8 @@ jobs:
             -P "${DEPLOY_PORT}"
             -o BatchMode=yes
             -o IdentitiesOnly=yes
-            -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="${SSH_DIR}/known_hosts"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
           )
 
           scp "${ssh_opts[@]}" "${ARCHIVE_NAME}" \
@@ -171,8 +162,8 @@ jobs:
             -p "${DEPLOY_PORT}"
             -o BatchMode=yes
             -o IdentitiesOnly=yes
-            -o StrictHostKeyChecking=yes
-            -o UserKnownHostsFile="${SSH_DIR}/known_hosts"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
           )
           target="${DEPLOY_SSH_USER}@${DEPLOY_HOST}"
 
