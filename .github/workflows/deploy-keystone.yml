@@ -20,7 +20,6 @@ env:
   DEPLOY_IMAGE_NAME: ${{ vars.DEPLOY_IMAGE_NAME || 'cloudpods/keystone' }}
   DEPLOY_CONTAINER_NAME: ${{ vars.DEPLOY_CONTAINER_NAME || 'keystone' }}
   DEPLOY_CONFIG_FILE: ${{ vars.DEPLOY_CONFIG_FILE || '/etc/yunion/keystone.conf' }}
-  DEPLOY_FERNET_KEYS_DIR: ${{ vars.DEPLOY_FERNET_KEYS_DIR || '/etc/yunion/keystone/fernet-keys' }}
 
 jobs:
   deploy:
@@ -47,7 +46,6 @@ jobs:
             DEPLOY_IMAGE_NAME
             DEPLOY_CONTAINER_NAME
             DEPLOY_CONFIG_FILE
-            DEPLOY_FERNET_KEYS_DIR
             DEPLOY_SSH_USER
             DEPLOY_SSH_PRIVATE_KEY
           )
@@ -174,7 +172,6 @@ jobs:
             "${DEPLOY_IMAGE_NAME}" \
             "${DEPLOY_CONTAINER_NAME}" \
             "${DEPLOY_CONFIG_FILE}" \
-            "${DEPLOY_FERNET_KEYS_DIR}" \
             "${ARCHIVE_NAME}")"
 
           ssh "${ssh_opts[@]}" "${target}" \
@@ -185,8 +182,7 @@ jobs:
           deploy_image_name="$2"
           deploy_container_name="$3"
           deploy_config_file="$4"
-          deploy_fernet_keys_dir="$5"
-          archive_name="$6"
+          archive_name="$5"
 
           cd "$deploy_target_dir"
 
@@ -198,11 +194,6 @@ jobs:
             echo "Keystone config not found: $deploy_config_file" >&2
             exit 1
           }
-          test -d "$deploy_fernet_keys_dir" || {
-            echo "Fernet keys directory not found: $deploy_fernet_keys_dir" >&2
-            exit 1
-          }
-
           gunzip -c "$archive_name" | docker load
           rm -f -- "$archive_name"
 
@@ -214,7 +205,6 @@ jobs:
             --restart unless-stopped \
             --network host \
             --volume "$deploy_config_file:$deploy_config_file:ro" \
-            --volume "$deploy_fernet_keys_dir:$deploy_fernet_keys_dir:ro" \
             "$deploy_image_name:latest" \
             /opt/yunion/bin/keystone --config "$deploy_config_file"
 
