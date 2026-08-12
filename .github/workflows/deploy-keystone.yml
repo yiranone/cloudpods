@@ -16,7 +16,7 @@ concurrency:
 env:
   DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
   DEPLOY_PORT: ${{ vars.DEPLOY_SSH_PORT || '22' }}
-  DEPLOY_TARGET_DIR: ${{ vars.DEPLOY_TARGET_DIR || '/opt/yunion/keystone' }}
+  DEPLOY_TARGET_DIR: /tmp
   DEPLOY_IMAGE_NAME: ${{ vars.DEPLOY_IMAGE_NAME || 'cloudpods/keystone' }}
   DEPLOY_CONTAINER_NAME: ${{ vars.DEPLOY_CONTAINER_NAME || 'keystone' }}
   DEPLOY_CONFIG_FILE: ${{ vars.DEPLOY_CONFIG_FILE || '/etc/yunion/keystone.conf' }}
