@@ -276,6 +276,10 @@ func initDefaultEtcdClient(opts *common_options.DBOptions) error {
 }
 
 func initEtcdLockOpts(opts *options.ComputeOptions) error {
+	if opts.LockmanMethod == common_options.LockMethodInMemory {
+		return nil
+	}
+
 	etcdEndpoint, err := common_app.FetchEtcdServiceInfo()
 	if err != nil {
 		if errors.Cause(err) == httperrors.ErrNotFound {
