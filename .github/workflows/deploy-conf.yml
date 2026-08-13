@@ -1,0 +1,214 @@
+name: Deploy YunionConf
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-yunionconf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+  DEPLOY_PORT: ${{ vars.DEPLOY_SSH_PORT || '22' }}
+  DEPLOY_TARGET_DIR: /tmp
+  DEPLOY_IMAGE_NAME: ${{ vars.DEPLOY_YUNIONCONF_IMAGE_NAME || 'cloudpods/yunionconf' }}
+  DEPLOY_CONTAINER_NAME: ${{ vars.DEPLOY_YUNIONCONF_CONTAINER_NAME || 'yunionconf' }}
+  DEPLOY_CONFIG_FILE: ${{ vars.DEPLOY_YUNIONCONF_CONFIG_FILE || '/etc/yunion/yunionconf.conf' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate deployment configuration
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          required_vars=(
+            DEPLOY_HOST
+            DEPLOY_PORT
+            DEPLOY_TARGET_DIR
+            DEPLOY_IMAGE_NAME
+            DEPLOY_CONTAINER_NAME
+            DEPLOY_CONFIG_FILE
+            DEPLOY_SSH_USER
+            DEPLOY_SSH_PRIVATE_KEY
+          )
+
+          for var_name in "${required_vars[@]}"; do
+            if [ -z "${!var_name:-}" ]; then
+              echo "::error::Missing required deployment setting: ${var_name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build YunionConf image
+        env:
+          IMAGE_VERSION: sha-${{ github.sha }}
+        run: |
+          set -euxo pipefail
+
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            make docker-alpine-build F='cmd/yunionconf'
+
+          test -x _output/alpine-build/bin/yunionconf
+
+          SHORT_SHA="${GITHUB_SHA::12}"
+          docker build \
+            --label org.opencontainers.image.version="${IMAGE_VERSION}" \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -f build/docker/Dockerfile.yunionconf \
+            -t "${DEPLOY_IMAGE_NAME}:latest" \
+            -t "${DEPLOY_IMAGE_NAME}:${SHORT_SHA}" \
+            .
+
+          docker image inspect "${DEPLOY_IMAGE_NAME}:latest" >/dev/null
+
+      - name: Export deployment archive
+        id: archive
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="${GITHUB_SHA::12}"
+          ARCHIVE_NAME="yunionconf-${SHORT_SHA}.tar.gz"
+
+          docker save \
+            "${DEPLOY_IMAGE_NAME}:latest" \
+            "${DEPLOY_IMAGE_NAME}:${SHORT_SHA}" \
+            | gzip > "${ARCHIVE_NAME}"
+
+          test -s "${ARCHIVE_NAME}"
+          echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          ssh_dir="${RUNNER_TEMP}/yunionconf-ssh"
+          mkdir -p "${ssh_dir}"
+          chmod 700 "${ssh_dir}"
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "${ssh_dir}/id_ed25519"
+          chmod 600 "${ssh_dir}/id_ed25519"
+          echo "SSH_DIR=${ssh_dir}" >> "${GITHUB_ENV}"
+
+      - name: Prepare remote directory
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh_opts=(
+            -i "${SSH_DIR}/id_ed25519"
+            -p "${DEPLOY_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+
+          ssh "${ssh_opts[@]}" "${DEPLOY_SSH_USER}@${DEPLOY_HOST}" \
+            "mkdir -p -- '${DEPLOY_TARGET_DIR}'"
+
+      - name: Upload deployment archive
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          ARCHIVE_NAME: ${{ steps.archive.outputs.archive_name }}
+        run: |
+          set -euo pipefail
+
+          scp_opts=(
+            -i "${SSH_DIR}/id_ed25519"
+            -P "${DEPLOY_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+
+          scp "${scp_opts[@]}" "${ARCHIVE_NAME}" \
+            "${DEPLOY_SSH_USER}@${DEPLOY_HOST}:${DEPLOY_TARGET_DIR}/${ARCHIVE_NAME}"
+
+      - name: Load image and restart YunionConf
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          ARCHIVE_NAME: ${{ steps.archive.outputs.archive_name }}
+        run: |
+          set -euo pipefail
+
+          ssh_opts=(
+            -i "${SSH_DIR}/id_ed25519"
+            -p "${DEPLOY_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+
+          remote_args="$(printf '%q ' \
+            "${DEPLOY_TARGET_DIR}" \
+            "${DEPLOY_IMAGE_NAME}" \
+            "${DEPLOY_CONTAINER_NAME}" \
+            "${DEPLOY_CONFIG_FILE}" \
+            "${ARCHIVE_NAME}")"
+
+          ssh "${ssh_opts[@]}" "${DEPLOY_SSH_USER}@${DEPLOY_HOST}" \
+            "bash -se -- ${remote_args}" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          deploy_target_dir="$1"
+          deploy_image_name="$2"
+          deploy_container_name="$3"
+          deploy_config_file="$4"
+          archive_name="$5"
+
+          cd "$deploy_target_dir"
+          test -f "$archive_name" || {
+            echo "Deployment archive not found: $deploy_target_dir/$archive_name" >&2
+            exit 1
+          }
+          test -f "$deploy_config_file" || {
+            echo "YunionConf config not found: $deploy_config_file" >&2
+            exit 1
+          }
+
+          gunzip -c "$archive_name" | docker load
+          rm -f -- "$archive_name"
+
+          docker image inspect "$deploy_image_name:latest" >/dev/null
+          docker rm -f "$deploy_container_name" >/dev/null 2>&1 || true
+
+          docker run -d \
+            --name "$deploy_container_name" \
+            --restart unless-stopped \
+            --network host \
+            --volume "$deploy_config_file:$deploy_config_file:ro" \
+            "$deploy_image_name:latest" \
+            /opt/yunion/bin/yunionconf --config "$deploy_config_file"
+
+          sleep 2
+          if ! docker inspect -f '{{.State.Running}}' "$deploy_container_name" | grep -qx true; then
+            docker logs --tail 100 "$deploy_container_name" >&2 || true
+            exit 1
+          fi
+
+          docker image prune -f >/dev/null 2>&1 || true
+          echo "YunionConf container is running: $deploy_container_name"
+          REMOTE_SCRIPT
