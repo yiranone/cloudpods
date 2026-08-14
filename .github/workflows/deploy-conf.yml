@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - dev
+    paths:
+      - 'cmd/yunionconf/**'
+      - 'pkg/yunionconf/**'
+      - 'pkg/apis/yunionconf/**'
+      - 'build/docker/Dockerfile.yunionconf'
+      - '.github/workflows/deploy-conf.yml'
+      - 'Makefile'
+      - 'Makefile.common.mk'
   workflow_dispatch:
 
 permissions:

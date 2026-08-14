@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - dev
+    paths:
+      - 'cmd/keystone/**'
+      - 'pkg/keystone/**'
+      - 'pkg/apis/identity/**'
+      - 'build/docker/Dockerfile.keystone'
+      - '.github/workflows/deploy-keystone.yml'
+      - 'Makefile'
+      - 'Makefile.common.mk'
   workflow_dispatch:
 
 permissions:
