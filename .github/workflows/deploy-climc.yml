@@ -1,0 +1,193 @@
+name: Deploy Climc
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - 'cmd/climc/**'
+      - 'pkg/mcclient/**'
+      - 'vendor/yunion.io/x/structarg/**'
+      - 'Makefile'
+      - 'Makefile.common.mk'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-climc-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+  DEPLOY_PORT: ${{ vars.DEPLOY_SSH_PORT || '22' }}
+  DEPLOY_TARGET_DIR: /tmp
+  DEPLOY_INSTALL_DIR: ${{ vars.DEPLOY_CLIMC_INSTALL_DIR || '/opt/yunion/bin' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate deployment configuration
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          required_vars=(
+            DEPLOY_HOST
+            DEPLOY_PORT
+            DEPLOY_TARGET_DIR
+            DEPLOY_INSTALL_DIR
+            DEPLOY_SSH_USER
+            DEPLOY_SSH_PRIVATE_KEY
+          )
+
+          for var_name in "${required_vars[@]}"; do
+            if [ -z "${!var_name:-}" ]; then
+              echo "::error::Missing required deployment setting: ${var_name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build Climc binary
+        run: |
+          set -euxo pipefail
+
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            make docker-alpine-build F='cmd/climc'
+
+          test -x _output/alpine-build/bin/climc
+
+      - name: Export deployment archive
+        id: archive
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::12}"
+          archive_name="climc-${short_sha}.tar.gz"
+          tar -czf "${archive_name}" \
+            -C _output/alpine-build/bin \
+            climc
+
+          test -s "${archive_name}"
+          echo "archive_name=${archive_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          ssh_dir="${RUNNER_TEMP}/climc-ssh"
+          mkdir -p "${ssh_dir}"
+          chmod 700 "${ssh_dir}"
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "${ssh_dir}/id_ed25519"
+          chmod 600 "${ssh_dir}/id_ed25519"
+          echo "SSH_DIR=${ssh_dir}" >> "${GITHUB_ENV}"
+
+      - name: Prepare remote directory
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh_opts=(
+            -i "${SSH_DIR}/id_ed25519"
+            -p "${DEPLOY_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+
+          ssh "${ssh_opts[@]}" "${DEPLOY_SSH_USER}@${DEPLOY_HOST}" \
+            "mkdir -p -- '${DEPLOY_TARGET_DIR}'"
+
+      - name: Upload deployment archive
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          ARCHIVE_NAME: ${{ steps.archive.outputs.archive_name }}
+        run: |
+          set -euo pipefail
+
+          scp_opts=(
+            -i "${SSH_DIR}/id_ed25519"
+            -P "${DEPLOY_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+
+          scp "${scp_opts[@]}" "${ARCHIVE_NAME}" \
+            "${DEPLOY_SSH_USER}@${DEPLOY_HOST}:${DEPLOY_TARGET_DIR}/${ARCHIVE_NAME}"
+
+      - name: Install Climc binary
+        env:
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          ARCHIVE_NAME: ${{ steps.archive.outputs.archive_name }}
+        run: |
+          set -euo pipefail
+
+          ssh_opts=(
+            -i "${SSH_DIR}/id_ed25519"
+            -p "${DEPLOY_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+
+          remote_args="$(printf '%q ' \
+            "${DEPLOY_TARGET_DIR}" \
+            "${DEPLOY_INSTALL_DIR}" \
+            "${ARCHIVE_NAME}")"
+
+          ssh "${ssh_opts[@]}" "${DEPLOY_SSH_USER}@${DEPLOY_HOST}" \
+            "bash -se -- ${remote_args}" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          deploy_target_dir="$1"
+          deploy_install_dir="$2"
+          archive_name="$3"
+
+          archive_path="${deploy_target_dir}/${archive_name}"
+          test -f "${archive_path}" || {
+            echo "Deployment archive not found: ${archive_path}" >&2
+            exit 1
+          }
+
+          staging_dir="$(mktemp -d "${deploy_target_dir}/climc.XXXXXX")"
+          cleanup() {
+            rm -rf -- "${staging_dir}"
+            rm -f -- "${archive_path}"
+          }
+          trap cleanup EXIT
+
+          tar -xzf "${archive_path}" -C "${staging_dir}"
+          test -x "${staging_dir}/climc"
+
+          if [ -d "${deploy_install_dir}" ] && [ -w "${deploy_install_dir}" ]; then
+            install -m 0755 "${staging_dir}/climc" "${deploy_install_dir}/climc"
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo -n install -D -m 0755 \
+              "${staging_dir}/climc" "${deploy_install_dir}/climc"
+          else
+            echo "Cannot write to ${deploy_install_dir}; set DEPLOY_CLIMC_INSTALL_DIR to a writable path or configure passwordless sudo" >&2
+            exit 1
+          fi
+
+          test -x "${deploy_install_dir}/climc"
+          "${deploy_install_dir}/climc" --help >/dev/null
+          echo "Climc installed at ${deploy_install_dir}/climc"
+          REMOTE_SCRIPT
